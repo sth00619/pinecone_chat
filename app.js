@@ -15,6 +15,7 @@ const userRoutes = require('./server/src/routes/userRoutes');
 const authRoutes = require('./server/src/routes/authRoutes');
 const chatRoutes = require('./server/src/routes/chatRoutes');
 const messageRoutes = require('./server/src/routes/messageRoutes');
+const pineconeRoutes = require('./server/src/routes/pineconeRoutes');
 const errorHandler = require('./server/src/middleware/errorHandler');
 
 const app = express();
@@ -76,7 +77,8 @@ app.get('/', (req, res) => {
       auth: '/api/auth',
       users: '/api/users',
       chatRooms: '/api/chat-rooms',
-      messages: '/api/messages'
+      messages: '/api/messages',
+      pinecone: '/api/pinecone'  // 추가
     },
     frontend: 'http://localhost:3001',
     note: 'React 앱은 http://localhost:3001에서 실행 중입니다.'
@@ -88,6 +90,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/chat-rooms', chatRoutes);
 app.use('/api/messages', messageRoutes);
+app.use('/api/pinecone', pineconeRoutes);
 
 // 헬스 체크
 app.get('/health', (req, res) => {
