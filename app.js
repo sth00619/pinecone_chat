@@ -5,10 +5,20 @@ const session = require('express-session');
 const passport = require('passport');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJsDoc = require('swagger-jsdoc');
+const http = require('http');
+const WebSocketServer = require('./server/src/websocket/wsServer');
 require('dotenv').config();
 
 const initializePassport = require('./server/src/config/passport');
 initializePassport();
+
+// HTTP 서버 생성
+const server = http.createServer(app);
+
+// WebSocket 서버 초기화
+const wsServer = new WebSocketServer(server);
+// WebSocket 인스턴스를 전역적으로 사용할 수 있도록 설정
+app.set('wsServer', wsServer);
 
 // 라우트 import
 const userRoutes = require('./server/src/routes/userRoutes');
@@ -117,7 +127,7 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 3000;
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  server.listen(PORT, () => {  // app.listen 대신 server.listen 사용
     console.log('🚀=================================🚀');
     console.log(`   SeoulTech Chat API Server       `);
     console.log('🚀=================================🚀');
@@ -125,8 +135,9 @@ if (require.main === module) {
     console.log(`📚 API Docs: http://localhost:${PORT}/api-docs`);
     console.log(`💊 Health Check: http://localhost:${PORT}/health`);
     console.log(`📱 React App: http://localhost:3001`);
+    console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
     console.log('🚀=================================🚀');
   });
 }
 
-module.exports = app;
+module.exports = { app, server };

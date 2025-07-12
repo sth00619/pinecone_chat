@@ -1,13 +1,24 @@
 const { Pinecone } = require('@pinecone-database/pinecone');
 const OpenAI = require('openai');
-require('dotenv').config();
+const path = require('path');
+require('cross-fetch/polyfill');
+require('dotenv').config({ path: path.resolve(__dirname, '../../../.env') });
 
 class PineconeClient {
   constructor() {
     // 환경 변수 확인
     if (!process.env.PINECONE_API_KEY) {
+      console.error('Environment variables:', {
+        PINECONE_API_KEY: process.env.PINECONE_API_KEY ? 'Set' : 'Not set',
+        OPENAI_API_KEY: process.env.OPENAI_API_KEY ? 'Set' : 'Not set',
+        cwd: process.cwd(),
+        nodeVersion: process.version
+      });
       throw new Error('PINECONE_API_KEY is not set in environment variables');
     }
+    
+    console.log('Node.js version:', process.version);
+    console.log('Fetch available:', typeof fetch !== 'undefined');
     
     this.pinecone = new Pinecone({
       apiKey: process.env.PINECONE_API_KEY
@@ -94,11 +105,16 @@ class PineconeClient {
   // 유사도 검색
   async queryVectors(queryEmbedding, topK = 5, filter = {}) {
     try {
+      // filter가 비어있으면 기본 필터 추가
+      const queryFilter = Object.keys(filter).length > 0 ? filter : { 
+        category: { "$exists": true } 
+      };
+      
       const queryResponse = await this.index.query({
         vector: queryEmbedding,
         topK,
         includeMetadata: true,
-        filter
+        filter: queryFilter
       });
       return queryResponse.matches || [];
     } catch (error) {
