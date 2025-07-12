@@ -1,7 +1,9 @@
+// server/src/controllers/messageController.js
 const messageDao = require('../dao/messageDao');
 const chatRoomDao = require('../dao/chatRoomDao');
 const knowledgeDao = require('../dao/knowledgeDao');
 const pineconeDao = require('../dao/pineconeDao');
+const learningDao = require('../dao/learningDao');
 const axios = require('axios');
 
 // ChatGPT API 호출 함수
@@ -40,6 +42,24 @@ async function askChatGPT(userMessage) {
 }
 
 class MessageController {
+  constructor() {
+    // 메서드들을 this에 바인딩
+    this.getMessages = this.getMessages.bind(this);
+    this.sendMessage = this.sendMessage.bind(this);
+    this.deleteMessage = this.deleteMessage.bind(this);
+    this.getHelp = this.getHelp.bind(this);
+    this.handleUserFeedback = this.handleUserFeedback.bind(this);
+    this.analyzeSession = this.analyzeSession.bind(this);
+    this.generateBotResponse = this.generateBotResponse.bind(this);
+    this.generateBotResponseFromDB = this.generateBotResponseFromDB.bind(this);
+    this.addToLearningQueue = this.addToLearningQueue.bind(this);
+    this.saveGPTResponseToPinecone = this.saveGPTResponseToPinecone.bind(this);
+    this.extractKeywords = this.extractKeywords.bind(this);
+    this.getDefaultResponse = this.getDefaultResponse.bind(this);
+    this.evaluateSessionQuality = this.evaluateSessionQuality.bind(this);
+    this.queueSessionForLearning = this.queueSessionForLearning.bind(this);
+  }
+
   // 채팅방의 메시지 목록 조회
   async getMessages(req, res) {
     try {
@@ -90,9 +110,8 @@ class MessageController {
         content: content.trim()
       });
 
-      // AI 응답 생성 - 우선순위: Pinecone -> Local DB -> ChatGPT
-      const messageController = new MessageController();
-      const { response: botResponse, matchedId, source } = await messageController.generateBotResponse(content);
+      // AI 응답 생성 - this를 사용하여 인스턴스 메서드 호출
+      const { response: botResponse, matchedId, source } = await this.generateBotResponse(content);
       const responseTime = Date.now() - startTime;
       
       console.log('Bot response generated:', { 
@@ -113,13 +132,22 @@ class MessageController {
       await chatRoomDao.updateChatRoomLastMessage(chat_room_id, botResponse);
 
       // 채팅 분석 로그 저장 (source 정보 포함)
-      await knowledgeDao.logChatAnalytics(
+      const analyticsId = await knowledgeDao.logChatAnalytics(
         content.trim(),
         botResponse,
         matchedId,
-        responseTime,
-        source // 추가 컬럼이 필요한 경우 DB 스키마 수정 필요
+        responseTime
       );
+
+      // 학습 큐에 추가 (비동기로 처리)
+      this.addToLearningQueue({
+        chat_analytics_id: analyticsId,
+        user_message: content.trim(),
+        bot_response: botResponse,
+        response_source: source,
+        confidence_score: source === 'pinecone' ? 0.9 : source === 'chatgpt' ? 0.7 : 0.5,
+        matched_knowledge_id: matchedId
+      });
 
       // 저장된 메시지들 조회해서 반환
       const userMessage = await messageDao.getMessageById(userMessageId);
@@ -128,7 +156,8 @@ class MessageController {
       res.status(201).json({
         userMessage,
         botMessage,
-        responseSource: source // 클라이언트에게 응답 출처 정보 제공
+        responseSource: source,
+        messageId: botMessageId // 피드백을 위한 메시지 ID
       });
     } catch (error) {
       console.error('Error sending message - Full error:', error);
@@ -140,12 +169,136 @@ class MessageController {
     }
   }
 
+  // 학습 큐에 추가하는 비동기 메서드
+  async addToLearningQueue(data) {
+    try {
+      // 우선순위 계산
+      let priority = 5;
+      
+      // ChatGPT 응답인 경우 우선순위 높임
+      if (data.response_source === 'chatgpt') {
+        priority = 7;
+      }
+      
+      // 신뢰도가 낮은 경우 우선순위 높임
+      if (data.confidence_score < 0.6) {
+        priority = 8;
+      }
+
+      await learningDao.addToLearningQueue({
+        ...data,
+        priority
+      });
+    } catch (error) {
+      console.error('Error adding to learning queue:', error);
+    }
+  }
+
+  // 사용자 피드백 처리 메서드
+  async handleUserFeedback(req, res) {
+    try {
+      const { messageId, feedbackType, feedbackText } = req.body;
+      const userId = req.userId; // authMiddleware에서 설정
+
+      if (!messageId || !feedbackType) {
+        return res.status(400).json({ error: 'messageId and feedbackType are required' });
+      }
+
+      // 피드백 저장
+      await learningDao.saveUserFeedback(messageId, userId, feedbackType, feedbackText);
+
+      // 부정적 피드백인 경우 학습 큐 우선순위 높임
+      if (feedbackType === 'not_helpful') {
+        // 메시지 정보 조회
+        const message = await messageDao.getMessageById(messageId);
+        if (message && message.role === 'bot') {
+          // 관련 학습 큐 항목의 우선순위 업데이트
+          await learningDao.updateLearningPriority(messageId, 9);
+        }
+      }
+
+      res.json({ message: 'Feedback recorded successfully' });
+    } catch (error) {
+      console.error('Error handling feedback:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  // 세션 종료 시 분석 메서드
+  async analyzeSession(req, res) {
+    try {
+      const { sessionStart, sessionEnd } = req.body;
+      const userId = req.userId;
+
+      // 세션 분석 데이터 수집
+      const sessionData = await learningDao.getSessionAnalytics(userId, sessionStart);
+      
+      // 세션 품질 평가
+      const sessionQuality = this.evaluateSessionQuality(sessionData);
+      
+      // 낮은 품질의 세션인 경우 학습 필요
+      if (sessionQuality < 0.6) {
+        // 해당 세션의 모든 대화를 학습 큐에 추가
+        await this.queueSessionForLearning(userId, sessionStart, sessionEnd);
+      }
+
+      res.json({ 
+        message: 'Session analyzed',
+        quality: sessionQuality,
+        metrics: sessionData
+      });
+    } catch (error) {
+      console.error('Error analyzing session:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  // 세션 품질 평가
+  evaluateSessionQuality(sessionData) {
+    let score = 0.5;
+    
+    // DB 답변 비율이 높을수록 좋음
+    const dbAnswerRatio = sessionData.db_answers / (sessionData.db_answers + sessionData.ai_answers);
+    score += dbAnswerRatio * 0.3;
+    
+    // 응답 시간이 빠를수록 좋음
+    if (sessionData.avg_response_time < 1000) {
+      score += 0.2;
+    }
+    
+    // 메시지가 적당히 많을수록 좋음 (사용자가 만족해서 계속 사용)
+    if (sessionData.message_count > 5 && sessionData.message_count < 50) {
+      score += 0.2;
+    }
+    
+    return Math.min(1, score);
+  }
+
+  // 세션 학습 큐에 추가
+  async queueSessionForLearning(userId, sessionStart, sessionEnd) {
+    // 해당 세션의 모든 대화 내역 조회
+    const messages = await messageDao.getSessionMessages(userId, sessionStart, sessionEnd);
+    
+    // 각 대화 쌍을 학습 큐에 추가
+    for (let i = 0; i < messages.length - 1; i += 2) {
+      if (messages[i].role === 'user' && messages[i + 1].role === 'bot') {
+        await learningDao.addToLearningQueue({
+          user_message: messages[i].content,
+          bot_response: messages[i + 1].content,
+          response_source: 'session_analysis',
+          priority: 6
+        });
+      }
+    }
+  }
+
   // 통합 AI 응답 생성 (Pinecone 우선)
   async generateBotResponse(userMessage) {
     try {
       console.log('🤖 Generating response for:', userMessage);
 
-      // 1. Pinecone 벡터 DB에서 검색
+      // 1. Pinecone 벡터 DB에서 검색 (임시 비활성화 - OpenAI API 키 문제)
+      /*
       try {
         const pineconeResult = await pineconeDao.searchAnswer(userMessage);
         if (pineconeResult && pineconeResult.score >= 0.8) {
@@ -157,12 +310,11 @@ class MessageController {
           };
         } else if (pineconeResult && pineconeResult.score >= 0.7) {
           console.log('⚠️ Medium confidence match in Pinecone, will try local DB too');
-          // 중간 신뢰도의 경우 로컬 DB도 확인
         }
       } catch (pineconeError) {
         console.error('Pinecone search error:', pineconeError);
-        // Pinecone 오류 시 계속 진행
       }
+      */
 
       // 2. 로컬 DB에서 검색 (기존 로직)
       const dbResult = await this.generateBotResponseFromDB(userMessage);
@@ -175,27 +327,13 @@ class MessageController {
         };
       }
 
-      // 3. 모두 실패 시 ChatGPT 호출
-      console.log('📡 No match found, calling ChatGPT...');
-      try {
-        const gptResponse = await askChatGPT(userMessage);
-        
-        // ChatGPT 응답을 Pinecone에 저장 (학습 효과)
-        this.saveGPTResponseToPinecone(userMessage, gptResponse);
-        
-        return {
-          response: gptResponse,
-          matchedId: null,
-          source: 'chatgpt'
-        };
-      } catch (gptError) {
-        console.error("❌ GPT 호출 실패:", gptError.message);
-        return {
-          response: this.getDefaultResponse(userMessage),
-          matchedId: null,
-          source: 'default'
-        };
-      }
+      // 3. 모두 실패 시 기본 응답 반환 (ChatGPT 임시 비활성화)
+      console.log('📡 No match found, using default response...');
+      return {
+        response: this.getDefaultResponse(userMessage),
+        matchedId: null,
+        source: 'default'
+      };
 
     } catch (error) {
       console.error('Error generating bot response:', error);

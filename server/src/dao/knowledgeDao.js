@@ -11,70 +11,74 @@ class KnowledgeDao {
       .trim();
   }
 
-  // 키워드로 지식베이스 검색 (개선된 버전)
+  // searchByKeywords 메서드 - 간소화된 버전
   async searchByKeywords(userMessage) {
     try {
-      // 메시지 정규화
-      const cleanedMessage = this.normalizeMessage(userMessage);
+      // 사용자 메시지를 소문자로 변환
+      const lowerMessage = userMessage.toLowerCase();
       
-      // 개선된 검색 쿼리
+      // 더 간단한 쿼리로 시작
       const query = `
-        SELECT kb.*, kc.name as category_name,
-          (
-            -- 전체 메시지에서 키워드 매칭
-            CASE 
-              WHEN LOWER(?) LIKE CONCAT('%', LOWER(kb.keywords), '%') THEN 20
-              ELSE 0
-            END +
-            -- 개별 키워드 매칭 점수
-            (
-              SELECT COUNT(*)
-              FROM (
-                SELECT TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', numbers.n), ',', -1)) as keyword
-                FROM (
-                  SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 
-                  UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8
-                ) numbers
-                WHERE numbers.n <= 1 + (LENGTH(kb.keywords) - LENGTH(REPLACE(kb.keywords, ',', '')))
-              ) as split_keywords
-              WHERE LOWER(?) LIKE CONCAT('%', LOWER(TRIM(split_keywords.keyword)), '%')
-            ) * 10 +
-            -- 우선순위 점수
-            kb.priority
-          ) as score
+        SELECT 
+          kb.id, 
+          kb.category_id, 
+          kb.question, 
+          kb.answer, 
+          kb.priority, 
+          kb.is_active,
+          kb.created_at, 
+          kb.updated_at, 
+          kc.name as category_name,
+          kb.keywords
         FROM knowledge_base kb
         JOIN knowledge_categories kc ON kb.category_id = kc.id
         WHERE kb.is_active = TRUE 
           AND kc.is_active = TRUE
           AND (
-            -- 키워드가 메시지에 포함되어 있는지 확인
-            LOWER(?) LIKE CONCAT('%', LOWER(SUBSTRING_INDEX(kb.keywords, ',', 1)), '%') OR
-            LOWER(?) LIKE CONCAT('%', LOWER(TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', 2), ',', -1))), '%') OR
-            LOWER(?) LIKE CONCAT('%', LOWER(TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', 3), ',', -1))), '%') OR
-            LOWER(?) LIKE CONCAT('%', LOWER(TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', 4), ',', -1))), '%') OR
-            LOWER(?) LIKE CONCAT('%', LOWER(TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', 5), ',', -1))), '%')
+            LOWER(kb.keywords) LIKE CONCAT('%', ?, '%')
+            OR LOWER(kb.question) LIKE CONCAT('%', ?, '%')
           )
-        ORDER BY score DESC, kb.priority DESC
+        ORDER BY kb.priority DESC
         LIMIT 5
       `;
       
-      const params = [
-        cleanedMessage,  // for full message matching
-        cleanedMessage,  // for individual keyword counting
-        cleanedMessage,  // WHERE condition 1
-        cleanedMessage,  // WHERE condition 2
-        cleanedMessage,  // WHERE condition 3
-        cleanedMessage,  // WHERE condition 4
-        cleanedMessage   // WHERE condition 5
-      ];
+      const [results] = await pool.query(query, [lowerMessage, lowerMessage]);
       
-      const [rows] = await pool.query(query, params);
+      // 결과가 있으면 더 정교한 점수 계산
+      if (results.length > 0) {
+        // 각 결과에 대해 점수 계산
+        const scoredResults = results.map(result => {
+          let score = result.priority || 0;
+          
+          // keywords가 있는 경우 키워드 매칭 점수 계산
+          if (result.keywords) {
+            const keywords = result.keywords.split(',').map(k => k.trim().toLowerCase());
+            keywords.forEach(keyword => {
+              if (lowerMessage.includes(keyword)) {
+                score += 10;
+              }
+            });
+          }
+          
+          // 질문이 정확히 일치하면 높은 점수
+          if (result.question.toLowerCase() === lowerMessage) {
+            score += 50;
+          }
+          
+          return { ...result, score };
+        });
+        
+        // 점수순으로 정렬
+        scoredResults.sort((a, b) => b.score - a.score);
+        
+        console.log(`Keyword search for "${userMessage}":`, scoredResults.length > 0 ? `Found ${scoredResults.length} matches` : 'No matches');
+        
+        return scoredResults;
+      }
       
-      console.log(`Keyword search for "${userMessage}":`, rows.length > 0 ? `Found ${rows.length} matches` : 'No matches');
-      
-      return rows;
+      return [];
     } catch (error) {
-      console.error('Error searching knowledge base:', error);
+      console.error('Error in searchByKeywords:', error);
       throw error;
     }
   }
@@ -121,7 +125,7 @@ class KnowledgeDao {
     return result.insertId;
   }
 
-  // 단어별 매칭 검색 (개선된 버전)
+  // 단어별 매칭 검색 (간소화된 버전)
   async searchByWords(userMessage) {
     try {
       // 메시지 정규화
@@ -130,70 +134,63 @@ class KnowledgeDao {
       
       if (words.length === 0) return [];
       
-      // 각 단어와 전체 메시지에 대한 검색
+      // 각 단어에 대한 OR 조건 생성
+      const conditions = [];
+      const params = [];
+      
+      words.forEach(word => {
+        conditions.push('LOWER(kb.keywords) LIKE ?');
+        conditions.push('LOWER(kb.question) LIKE ?');
+        params.push(`%${word}%`);
+        params.push(`%${word}%`);
+      });
+      
       const query = `
-        SELECT kb.*, kc.name as category_name,
-          (
-            -- 전체 메시지가 keywords에 있는 단어를 포함하는지
-            (
-              SELECT COUNT(*)
-              FROM (
-                SELECT TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', numbers.n), ',', -1)) as keyword
-                FROM (
-                  SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 
-                  UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8
-                ) numbers
-                WHERE numbers.n <= 1 + (LENGTH(kb.keywords) - LENGTH(REPLACE(kb.keywords, ',', '')))
-              ) as split_keywords
-              WHERE LOWER(?) LIKE CONCAT('%', LOWER(TRIM(split_keywords.keyword)), '%')
-            ) * 10 +
-            -- 개별 단어 매칭
-            ${words.map(() => 
-              `CASE WHEN LOWER(kb.keywords) LIKE CONCAT('%', LOWER(?), '%') THEN 2 ELSE 0 END`
-            ).join(' + ')} +
-            -- 질문에서의 매칭
-            ${words.map(() => 
-              `CASE WHEN LOWER(kb.question) LIKE CONCAT('%', LOWER(?), '%') THEN 1 ELSE 0 END`
-            ).join(' + ')} +
-            -- 우선순위
-            kb.priority
-          ) as match_score
+        SELECT 
+          kb.id,
+          kb.category_id,
+          kb.question,
+          kb.answer,
+          kb.priority,
+          kb.is_active,
+          kb.created_at,
+          kb.updated_at,
+          kc.name as category_name,
+          kb.keywords
         FROM knowledge_base kb
         JOIN knowledge_categories kc ON kb.category_id = kc.id
         WHERE kb.is_active = TRUE 
           AND kc.is_active = TRUE
-          AND (
-            -- 키워드나 질문에 단어가 포함되어 있는지
-            ${words.map(() => 'LOWER(kb.keywords) LIKE CONCAT("%", LOWER(?), "%")').join(' OR ')} OR
-            ${words.map(() => 'LOWER(kb.question) LIKE CONCAT("%", LOWER(?), "%")').join(' OR ')} OR
-            -- 전체 메시지에서 키워드 확인
-            LOWER(?) LIKE CONCAT('%', LOWER(SUBSTRING_INDEX(kb.keywords, ',', 1)), '%') OR
-            LOWER(?) LIKE CONCAT('%', LOWER(TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', 2), ',', -1))), '%') OR
-            LOWER(?) LIKE CONCAT('%', LOWER(TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', 3), ',', -1))), '%') OR
-            LOWER(?) LIKE CONCAT('%', LOWER(TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', 4), ',', -1))), '%')
-          )
-        ORDER BY match_score DESC, kb.priority DESC
+          AND (${conditions.join(' OR ')})
+        ORDER BY kb.priority DESC
         LIMIT 5
       `;
       
-      // 파라미터 배열 구성
-      const params = [
-        normalizedMessage,  // 전체 메시지 매칭용
-        ...words,          // 개별 단어 매칭 (keywords)
-        ...words,          // 개별 단어 매칭 (question)
-        ...words,          // WHERE 조건 (keywords)
-        ...words,          // WHERE 조건 (question)
-        normalizedMessage, // 전체 메시지 키워드 확인 1
-        normalizedMessage, // 전체 메시지 키워드 확인 2
-        normalizedMessage, // 전체 메시지 키워드 확인 3
-        normalizedMessage  // 전체 메시지 키워드 확인 4
-      ];
-      
       const [rows] = await pool.query(query, params);
       
-      console.log(`Word search for "${userMessage}":`, rows.length > 0 ? `Found ${rows.length} matches` : 'No matches');
+      // 점수 계산
+      const scoredResults = rows.map(row => {
+        let score = row.priority || 0;
+        
+        // 각 단어가 매칭되면 점수 추가
+        words.forEach(word => {
+          if (row.keywords && row.keywords.toLowerCase().includes(word)) {
+            score += 5;
+          }
+          if (row.question && row.question.toLowerCase().includes(word)) {
+            score += 3;
+          }
+        });
+        
+        return { ...row, score };
+      });
       
-      return rows;
+      // 점수순 정렬
+      scoredResults.sort((a, b) => b.score - a.score);
+      
+      console.log(`Word search for "${userMessage}":`, scoredResults.length > 0 ? `Found ${scoredResults.length} matches` : 'No matches');
+      
+      return scoredResults;
     } catch (error) {
       console.error('Error in word-based search:', error);
       throw error;
@@ -216,7 +213,7 @@ class KnowledgeDao {
     return rows[0];
   }
 
-  // 유사도 기반 검색 (추가 메서드)
+  // 유사도 기반 검색 (간소화된 버전)
   async searchBySimilarity(userMessage) {
     try {
       const normalizedMessage = this.normalizeMessage(userMessage);
@@ -228,30 +225,32 @@ class KnowledgeDao {
       
       if (keywords.length === 0) return [];
       
+      // 간단한 매칭 쿼리
+      const conditions = keywords.map(() => 'LOWER(kb.keywords) LIKE ?').join(' OR ');
+      const params = keywords.map(keyword => `%${keyword}%`);
+      
       const query = `
-        SELECT kb.*, kc.name as category_name,
-          (
-            SELECT COUNT(*)
-            FROM (
-              SELECT TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(kb.keywords, ',', numbers.n), ',', -1)) as keyword
-              FROM (
-                SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 
-                UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8
-              ) numbers
-              WHERE numbers.n <= 1 + (LENGTH(kb.keywords) - LENGTH(REPLACE(kb.keywords, ',', '')))
-            ) as split_keywords
-            WHERE ${keywords.map(() => 'LOWER(TRIM(split_keywords.keyword)) = LOWER(?)').join(' OR ')}
-          ) as exact_match_count
+        SELECT 
+          kb.id,
+          kb.category_id,
+          kb.question,
+          kb.answer,
+          kb.priority,
+          kb.is_active,
+          kb.created_at,
+          kb.updated_at,
+          kc.name as category_name,
+          kb.keywords
         FROM knowledge_base kb
         JOIN knowledge_categories kc ON kb.category_id = kc.id
         WHERE kb.is_active = TRUE 
           AND kc.is_active = TRUE
-        HAVING exact_match_count > 0
-        ORDER BY exact_match_count DESC, kb.priority DESC
+          AND (${conditions})
+        ORDER BY kb.priority DESC
         LIMIT 3
       `;
       
-      const [rows] = await pool.query(query, keywords);
+      const [rows] = await pool.query(query, params);
       return rows;
     } catch (error) {
       console.error('Error in similarity search:', error);
@@ -283,7 +282,7 @@ class KnowledgeDao {
       if (wordResults.length > 0) {
         console.log('Word match found:', wordResults[0].id);
         return wordResults[0];
-      }ㅁ
+      }
       
       // 4. 유사도 기반 검색
       const similarResults = await this.searchBySimilarity(userMessage);

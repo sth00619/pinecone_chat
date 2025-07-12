@@ -9,6 +9,8 @@ router.get('/help', messageController.getHelp); // 도움말은 인증 불필요
 router.get('/chat-room/:chatRoomId', authMiddleware, messageController.getMessages);
 router.post('/', authMiddleware, messageController.sendMessage);
 router.delete('/:id', authMiddleware, messageController.deleteMessage);
+router.post('/feedback', authMiddleware, messageController.handleUserFeedback);
+router.post('/analyze-session', authMiddleware, messageController.analyzeSession);
 
 /**
  * @swagger
@@ -120,7 +122,6 @@ router.delete('/:id', authMiddleware, messageController.deleteMessage);
  *       500:
  *         description: 서버 내부 오류
  */
-router.get('/help', messageController.getHelp);
 
 /**
  * @swagger
@@ -129,6 +130,8 @@ router.get('/help', messageController.getHelp);
  *     summary: 채팅방의 메시지 목록 조회
  *     description: 특정 채팅방의 모든 메시지를 순서대로 조회합니다.
  *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: chatRoomId
@@ -141,7 +144,7 @@ router.get('/help', messageController.getHelp);
  *       - in: query
  *         name: limit
  *         required: false
- *         description: 한 번에 가져올 메시지 수 (기본값: 100)
+ *         description: 한 번에 가져올 메시지 수
  *         schema:
  *           type: integer
  *           minimum: 1
@@ -151,7 +154,7 @@ router.get('/help', messageController.getHelp);
  *       - in: query
  *         name: offset
  *         required: false
- *         description: 건너뛸 메시지 수 (기본값: 0)
+ *         description: 건너뛸 메시지 수
  *         schema:
  *           type: integer
  *           minimum: 0
@@ -171,7 +174,6 @@ router.get('/help', messageController.getHelp);
  *       500:
  *         description: 서버 내부 오류
  */
-router.get('/chat-room/:chatRoomId', messageController.getMessages);
 
 /**
  * @swagger
@@ -180,6 +182,8 @@ router.get('/chat-room/:chatRoomId', messageController.getMessages);
  *     summary: 새 메시지 전송 (AI 응답 포함)
  *     description: 사용자 메시지를 전송하고 AI 봇의 자동 응답을 받습니다.
  *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -200,7 +204,6 @@ router.get('/chat-room/:chatRoomId', messageController.getMessages);
  *       500:
  *         description: 서버 내부 오류
  */
-router.post('/', messageController.sendMessage);
 
 /**
  * @swagger
@@ -209,6 +212,8 @@ router.post('/', messageController.sendMessage);
  *     summary: 메시지 삭제
  *     description: 특정 메시지를 데이터베이스에서 완전히 삭제합니다.
  *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -226,6 +231,81 @@ router.post('/', messageController.sendMessage);
  *       500:
  *         description: 서버 내부 오류
  */
-router.delete('/:id', messageController.deleteMessage);
+
+/**
+ * @swagger
+ * /api/messages/feedback:
+ *   post:
+ *     summary: 메시지에 대한 사용자 피드백
+ *     description: 봇의 답변에 대한 사용자 피드백을 수집합니다.
+ *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - messageId
+ *               - feedbackType
+ *             properties:
+ *               messageId:
+ *                 type: integer
+ *                 description: 피드백 대상 메시지 ID
+ *                 example: 123
+ *               feedbackType:
+ *                 type: string
+ *                 enum: [helpful, not_helpful, report]
+ *                 description: 피드백 유형
+ *               feedbackText:
+ *                 type: string
+ *                 description: 추가 피드백 텍스트 (선택)
+ *                 example: "더 자세한 정보가 필요합니다"
+ *     responses:
+ *       200:
+ *         description: 피드백 저장 성공
+ *       400:
+ *         description: 잘못된 요청
+ *       401:
+ *         description: 인증 필요
+ */
+
+/**
+ * @swagger
+ * /api/messages/analyze-session:
+ *   post:
+ *     summary: 세션 분석
+ *     description: 사용자의 채팅 세션을 분석하여 학습에 활용합니다.
+ *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sessionStart
+ *               - sessionEnd
+ *             properties:
+ *               sessionStart:
+ *                 type: string
+ *                 format: date-time
+ *                 description: 세션 시작 시간
+ *               sessionEnd:
+ *                 type: string
+ *                 format: date-time
+ *                 description: 세션 종료 시간
+ *     responses:
+ *       200:
+ *         description: 세션 분석 완료
+ *       400:
+ *         description: 잘못된 요청
+ *       401:
+ *         description: 인증 필요
+ */
 
 module.exports = router;

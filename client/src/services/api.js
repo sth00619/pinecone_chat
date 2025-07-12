@@ -15,10 +15,9 @@ api.interceptors.request.use(
     const token = localStorage.getItem('token');
     
     // 토큰이 있으면 Authorization 헤더에 추가
-    if (token) {
+    if (token && !config.url.includes('/auth/register')) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    
     return config;
   },
   (error) => {
