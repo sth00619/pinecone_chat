@@ -1,6 +1,7 @@
 const express = require('express');
 const messageController = require('../controllers/messageController');
 const authMiddleware = require('../middleware/authMiddleware');
+const personalDataDao = require('../dao/personalDataDao');
 
 const router = express.Router();
 
@@ -9,6 +10,64 @@ router.get('/help', messageController.getHelp); // 도움말은 인증 불필요
 router.get('/chat-room/:chatRoomId', authMiddleware, messageController.getMessages);
 router.post('/', authMiddleware, messageController.sendMessage);
 router.delete('/:id', authMiddleware, messageController.deleteMessage);
+router.post('/feedback', authMiddleware, messageController.handleUserFeedback);
+router.post('/analyze-session', authMiddleware, messageController.analyzeSession);
+
+// 피드백 엔드포인트 추가
+router.post('/:id/feedback', authMiddleware, messageController.handleMessageFeedback);
+
+// 개인정보 관련 엔드포인트
+router.get('/personal-data', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const data = await personalDataDao.getUserPersonalData(userId);
+    res.json({ personalData: data });
+  } catch (error) {
+    console.error('Error fetching personal data:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 개인정보 삭제 엔드포인트
+router.delete('/personal-data/:id', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const dataId = req.params.id;
+    
+    // 사용자 본인의 데이터인지 확인
+    const personalData = await personalDataDao.getPersonalDataById(dataId);
+    if (!personalData || personalData.user_id !== userId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    await personalDataDao.deletePersonalData(dataId);
+    res.json({ message: 'Personal data deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting personal data:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 개인정보 만료 설정 엔드포인트
+router.put('/personal-data/:id/expire', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const dataId = req.params.id;
+    const { expireAt } = req.body;
+    
+    // 사용자 본인의 데이터인지 확인
+    const personalData = await personalDataDao.getPersonalDataById(dataId);
+    if (!personalData || personalData.user_id !== userId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    await personalDataDao.setExpiration(dataId, expireAt);
+    res.json({ message: 'Expiration date set successfully' });
+  } catch (error) {
+    console.error('Error setting expiration:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 /**
  * @swagger
@@ -86,6 +145,43 @@ router.delete('/:id', authMiddleware, messageController.deleteMessage);
  *             content:
  *               type: string
  *               example: "서울과학기술대학교는 1910년에 설립된 국립대학교입니다..."
+ *         responseSource:
+ *           type: string
+ *           enum: [pinecone, localdb, chatgpt, cache, default, error]
+ *           description: 응답 소스
+ *         cached:
+ *           type: boolean
+ *           description: 캐시된 응답 여부
+ *         personalDataDetected:
+ *           type: boolean
+ *           description: 개인정보 감지 여부
+ *     PersonalData:
+ *       type: object
+ *       properties:
+ *         id:
+ *           type: integer
+ *           description: 개인정보 ID
+ *         user_id:
+ *           type: integer
+ *           description: 사용자 ID
+ *         data_type:
+ *           type: string
+ *           description: 데이터 타입
+ *           enum: [email, phone, birthday, address, student_id, password, residence_number]
+ *         data_value:
+ *           type: string
+ *           description: 데이터 값 (암호화됨)
+ *         context:
+ *           type: object
+ *           description: 추가 컨텍스트 정보
+ *         expires_at:
+ *           type: string
+ *           format: date-time
+ *           description: 만료 일시
+ *         created_at:
+ *           type: string
+ *           format: date-time
+ *           description: 생성 일시
  */
 
 /**
@@ -120,7 +216,6 @@ router.delete('/:id', authMiddleware, messageController.deleteMessage);
  *       500:
  *         description: 서버 내부 오류
  */
-router.get('/help', messageController.getHelp);
 
 /**
  * @swagger
@@ -129,6 +224,8 @@ router.get('/help', messageController.getHelp);
  *     summary: 채팅방의 메시지 목록 조회
  *     description: 특정 채팅방의 모든 메시지를 순서대로 조회합니다.
  *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: chatRoomId
@@ -141,7 +238,7 @@ router.get('/help', messageController.getHelp);
  *       - in: query
  *         name: limit
  *         required: false
- *         description: 한 번에 가져올 메시지 수 (기본값: 100)
+ *         description: 한 번에 가져올 메시지 수
  *         schema:
  *           type: integer
  *           minimum: 1
@@ -151,7 +248,7 @@ router.get('/help', messageController.getHelp);
  *       - in: query
  *         name: offset
  *         required: false
- *         description: 건너뛸 메시지 수 (기본값: 0)
+ *         description: 건너뛸 메시지 수
  *         schema:
  *           type: integer
  *           minimum: 0
@@ -171,15 +268,16 @@ router.get('/help', messageController.getHelp);
  *       500:
  *         description: 서버 내부 오류
  */
-router.get('/chat-room/:chatRoomId', messageController.getMessages);
 
 /**
  * @swagger
  * /api/messages:
  *   post:
  *     summary: 새 메시지 전송 (AI 응답 포함)
- *     description: 사용자 메시지를 전송하고 AI 봇의 자동 응답을 받습니다.
+ *     description: 사용자 메시지를 전송하고 AI 봇의 자동 응답을 받습니다. 개인정보 감지 및 캐싱 기능이 포함됩니다.
  *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -200,7 +298,6 @@ router.get('/chat-room/:chatRoomId', messageController.getMessages);
  *       500:
  *         description: 서버 내부 오류
  */
-router.post('/', messageController.sendMessage);
 
 /**
  * @swagger
@@ -209,6 +306,8 @@ router.post('/', messageController.sendMessage);
  *     summary: 메시지 삭제
  *     description: 특정 메시지를 데이터베이스에서 완전히 삭제합니다.
  *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -226,6 +325,224 @@ router.post('/', messageController.sendMessage);
  *       500:
  *         description: 서버 내부 오류
  */
-router.delete('/:id', messageController.deleteMessage);
+
+/**
+ * @swagger
+ * /api/messages/feedback:
+ *   post:
+ *     summary: 메시지에 대한 사용자 피드백
+ *     description: 봇의 답변에 대한 사용자 피드백을 수집합니다.
+ *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - messageId
+ *               - feedbackType
+ *             properties:
+ *               messageId:
+ *                 type: integer
+ *                 description: 피드백 대상 메시지 ID
+ *                 example: 123
+ *               feedbackType:
+ *                 type: string
+ *                 enum: [helpful, not_helpful, report]
+ *                 description: 피드백 유형
+ *               feedbackText:
+ *                 type: string
+ *                 description: 추가 피드백 텍스트 (선택)
+ *                 example: "더 자세한 정보가 필요합니다"
+ *     responses:
+ *       200:
+ *         description: 피드백 저장 성공
+ *       400:
+ *         description: 잘못된 요청
+ *       401:
+ *         description: 인증 필요
+ */
+
+/**
+ * @swagger
+ * /api/messages/{id}/feedback:
+ *   post:
+ *     summary: 메시지 평점 피드백
+ *     description: 특정 메시지에 대한 평점과 도움 여부 피드백을 제공합니다.
+ *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: 피드백할 메시지의 ID
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           example: 123
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               rating:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 5
+ *                 description: 1-5점 평점
+ *                 example: 4
+ *               helpful:
+ *                 type: boolean
+ *                 description: 도움이 되었는지 여부
+ *                 example: true
+ *     responses:
+ *       200:
+ *         description: 피드백 저장 성공
+ *       400:
+ *         description: 잘못된 요청
+ *       401:
+ *         description: 인증 필요
+ */
+
+/**
+ * @swagger
+ * /api/messages/personal-data:
+ *   get:
+ *     summary: 사용자 개인정보 조회
+ *     description: 현재 사용자가 시스템에 저장한 개인정보 목록을 조회합니다.
+ *     tags: [Messages, Personal Data]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: 개인정보 목록 조회 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 personalData:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/PersonalData'
+ *       401:
+ *         description: 인증 필요
+ *       500:
+ *         description: 서버 내부 오류
+ */
+
+/**
+ * @swagger
+ * /api/messages/personal-data/{id}:
+ *   delete:
+ *     summary: 개인정보 삭제
+ *     description: 특정 개인정보 항목을 삭제합니다.
+ *     tags: [Messages, Personal Data]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: 삭제할 개인정보의 ID
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           example: 1
+ *     responses:
+ *       200:
+ *         description: 개인정보 삭제 성공
+ *       403:
+ *         description: 접근 권한 없음
+ *       404:
+ *         description: 개인정보를 찾을 수 없음
+ *       500:
+ *         description: 서버 내부 오류
+ */
+
+/**
+ * @swagger
+ * /api/messages/personal-data/{id}/expire:
+ *   put:
+ *     summary: 개인정보 만료 설정
+ *     description: 특정 개인정보의 만료 일시를 설정합니다.
+ *     tags: [Messages, Personal Data]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: 만료 설정할 개인정보의 ID
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           example: 1
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - expireAt
+ *             properties:
+ *               expireAt:
+ *                 type: string
+ *                 format: date-time
+ *                 description: 만료 일시
+ *                 example: "2024-12-31T23:59:59Z"
+ *     responses:
+ *       200:
+ *         description: 만료 설정 성공
+ *       403:
+ *         description: 접근 권한 없음
+ *       404:
+ *         description: 개인정보를 찾을 수 없음
+ *       500:
+ *         description: 서버 내부 오류
+ */
+
+/**
+ * @swagger
+ * /api/messages/analyze-session:
+ *   post:
+ *     summary: 세션 분석
+ *     description: 사용자의 채팅 세션을 분석하여 학습에 활용합니다.
+ *     tags: [Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sessionStart
+ *               - sessionEnd
+ *             properties:
+ *               sessionStart:
+ *                 type: string
+ *                 format: date-time
+ *                 description: 세션 시작 시간
+ *               sessionEnd:
+ *                 type: string
+ *                 format: date-time
+ *                 description: 세션 종료 시간
+ *     responses:
+ *       200:
+ *         description: 세션 분석 완료
+ *       400:
+ *         description: 잘못된 요청
+ *       401:
+ *         description: 인증 필요
+ */
 
 module.exports = router;
