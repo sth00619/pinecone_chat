@@ -3,6 +3,7 @@ const express = require('express');
 const authController = require('../authController');
 const userDao = require('../../dao/userDao');
 const bcrypt = require('bcryptjs');
+const pool = require('../../config/database');
 
 // Mock 설정
 jest.mock('../../dao/userDao');
@@ -16,6 +17,12 @@ app.post('/register', authController.register);
 describe('AuthController', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });  
+  
+  // 테스트 스위트 종료 시 정리
+  afterAll(async () => {
+    // 이 테스트 파일에서 사용한 리소스 정리
+    jest.restoreAllMocks();
   });
 
   describe('POST /login', () => {
