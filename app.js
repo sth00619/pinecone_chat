@@ -177,5 +177,4 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-module.exports = app;
-module.exports.server = server;
+module.exports = { app, server };
