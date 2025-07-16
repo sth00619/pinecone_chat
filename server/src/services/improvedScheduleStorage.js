@@ -8,7 +8,7 @@ class ImprovedScheduleStorage {
     this.masterKey = Buffer.from(process.env.ENCRYPTION_MASTER_KEY || crypto.randomBytes(32));
   }
 
-  // 통합된 일정 저장 (하나의 행에 모든 정보)
+  // 통합된 일정 저장
   async saveIntegratedSchedule(userId, chatRoomId, scheduleData, originalMessage) {
     const connection = await pool.getConnection();
     try {
@@ -64,65 +64,25 @@ class ImprovedScheduleStorage {
         confidence: scheduleData.confidence || 0.9
       };
 
-      // 통합된 일정을 하나의 행에 저장 (컬럼 존재 여부 확인)
-      try {
-        // 새 컬럼이 있는지 확인
-        const [columns] = await connection.query(
-          "SHOW COLUMNS FROM user_personal_data LIKE 'schedule_title'"
-        );
-        
-        const hasNewColumns = columns.length > 0;
-        
-        let query, params;
-        
-        if (hasNewColumns) {
-          // 새 컬럼이 있는 경우
-          query = `INSERT INTO user_personal_data 
-                   (user_id, chat_room_id, data_type, data_key, encrypted_value, 
-                    original_message, iv, auth_tag, context, confidence_score,
-                    schedule_title, schedule_date, schedule_time, schedule_location) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-          params = [
-            userId, chatRoomId, 'schedule', integratedSchedule.title,
-            encryptedValue, originalMessage, iv, authTag,
-            JSON.stringify(context), scheduleData.confidence || 0.9,
-            integratedSchedule.title, parsedDate, parsedTime, integratedSchedule.location
-          ];
-        } else {
-          // 기존 컬럼만 사용 (context에 모든 정보 저장)
-          const enhancedContext = {
-            ...context,
-            schedule_title: integratedSchedule.title,
-            schedule_date: parsedDate,
-            schedule_time: parsedTime,
-            schedule_location: integratedSchedule.location
-          };
-          
-          query = `INSERT INTO user_personal_data 
-                   (user_id, chat_room_id, data_type, data_key, encrypted_value, 
-                    original_message, iv, auth_tag, context, confidence_score) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-          params = [
-            userId, chatRoomId, 'schedule', integratedSchedule.title,
-            encryptedValue, originalMessage, iv, authTag,
-            JSON.stringify(enhancedContext), scheduleData.confidence || 0.9
-          ];
-        }
-        
-        const [result] = await connection.query(query, params);
-        
-        console.log(`✅ Integrated schedule saved (${hasNewColumns ? 'new' : 'legacy'} format): ID ${result.insertId}`);
-        return {
-          id: result.insertId,
-          success: true
-        };
-        
-      } catch (queryError) {
-        console.error('❌ Database insert failed:', queryError);
-        throw queryError;
-      }
+      // DB에 저장
+      const query = `INSERT INTO user_personal_data 
+               (user_id, chat_room_id, data_type, data_key, encrypted_value, 
+                original_message, iv, auth_tag, context, confidence_score,
+                schedule_title, schedule_date, schedule_time, schedule_location) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+               
+      const params = [
+        userId, chatRoomId, 'schedule', integratedSchedule.title,
+        encryptedValue, originalMessage, iv, authTag,
+        JSON.stringify(context), scheduleData.confidence || 0.9,
+        integratedSchedule.title, parsedDate, parsedTime, integratedSchedule.location
+      ];
+      
+      const [result] = await connection.query(query, params);
+      
+      console.log(`✅ Integrated schedule saved: ID ${result.insertId}`);
 
-      // 로그 기록 (하나의 통합된 로그)
+      // 로그 기록
       await connection.query(
         `INSERT INTO personal_data_logs 
          (chat_room_id, user_id, data_type, detected_value, confidence_score, action_taken) 
@@ -139,10 +99,10 @@ class ImprovedScheduleStorage {
 
       await connection.commit();
       
-      console.log(`✅ Integrated schedule saved successfully: ID ${result.insertId}`);
       return {
         id: result.insertId,
-        success: true
+        success: true,
+        ...integratedSchedule
       };
 
     } catch (error) {
@@ -154,38 +114,77 @@ class ImprovedScheduleStorage {
     }
   }
 
-  // 날짜 문자열 파싱 (한국어 → DATE 형식)
+  // 날짜 문자열 파싱 (한국어 → DATE 형식) - 수정된 버전
   parseDateString(dateStr) {
     if (!dateStr) return null;
 
     try {
-      // "4월 1일" 형식 처리
+      console.log('🔍 Parsing date string:', dateStr);
+      
+      // "6월 2일" 형식 처리
       const koreanMatch = dateStr.match(/(\d{1,2})월\s*(\d{1,2})일/);
       if (koreanMatch) {
         const month = parseInt(koreanMatch[1]);
         const day = parseInt(koreanMatch[2]);
-        const year = new Date().getFullYear(); // 현재 연도 사용
+        const currentYear = new Date().getFullYear(); // 2025
+        const currentMonth = new Date().getMonth() + 1; // 현재 월 (1-12)
+        const currentDay = new Date().getDate(); // 현재 일
         
-        // 지난 날짜인 경우 다음 연도로 설정
-        const date = new Date(year, month - 1, day);
-        if (date < new Date()) {
-          date.setFullYear(year + 1);
+        let targetYear = currentYear;
+        
+        // 더 똑똑한 연도 추론 로직
+        if (month < currentMonth) {
+          // 이전 월인 경우 다음 해로 설정 (예: 현재 7월, 입력 6월 → 2026년 6월)
+          targetYear = currentYear + 1;
+          console.log(`📅 Previous month detected (${month}월 < ${currentMonth}월), setting to ${targetYear}`);
+        } else if (month === currentMonth && day < currentDay) {
+          // 같은 월이지만 이전 일인 경우
+          // 이 경우에는 사용자의 의도를 고려해서 현재 연도 유지 또는 다음 해 설정
+          // 보통 일정 등록은 미래를 위한 것이므로 다음 해로 설정
+          if (currentDay - day > 15) {
+            // 15일 이상 차이나면 다음 해로 설정
+            targetYear = currentYear + 1;
+            console.log(`📅 Past date with significant gap (${day}일 < ${currentDay}일), setting to ${targetYear}`);
+          } else {
+            // 얼마 차이 안나면 현재 연도 유지 (사용자가 과거 일정을 기록할 수도 있음)
+            console.log(`📅 Recent past date, keeping current year ${targetYear}`);
+          }
+        } else {
+          // 미래 날짜인 경우 현재 연도 유지
+          console.log(`📅 Future date detected, keeping current year ${targetYear}`);
         }
         
-        return date.toISOString().split('T')[0]; // YYYY-MM-DD 형식
+        const finalDate = `${targetYear}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+        console.log(`✅ Parsed date: ${dateStr} → ${finalDate}`);
+        return finalDate;
+      }
+
+      // "2025-07-01" 같은 ISO 형식
+      const isoMatch = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if (isoMatch) {
+        const year = parseInt(isoMatch[1]);
+        const month = parseInt(isoMatch[2]);
+        const day = parseInt(isoMatch[3]);
+        const finalDate = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+        console.log(`✅ Parsed ISO date: ${dateStr} → ${finalDate}`);
+        return finalDate;
       }
 
       // 일반적인 날짜 형식 시도
       const date = new Date(dateStr);
       if (!isNaN(date.getTime())) {
-        return date.toISOString().split('T')[0];
+        const finalDate = date.toISOString().split('T')[0];
+        console.log(`✅ Parsed generic date: ${dateStr} → ${finalDate}`);
+        return finalDate;
       }
 
-    } catch (error) {
-      console.warn('Date parsing failed:', dateStr, error.message);
-    }
+      console.warn('⚠️ Could not parse date:', dateStr);
+      return null;
 
-    return null;
+    } catch (error) {
+      console.warn('❌ Date parsing failed:', dateStr, error.message);
+      return null;
+    }
   }
 
   // 시간 문자열 파싱
@@ -193,9 +192,13 @@ class ImprovedScheduleStorage {
     if (!timeStr) return null;
 
     try {
+      console.log('🕐 Parsing time string:', timeStr);
+      
       // "14:00" 형식
       if (/^\d{1,2}:\d{2}$/.test(timeStr)) {
-        return timeStr + ':00'; // HH:MM:SS 형식
+        const result = timeStr + ':00'; // HH:MM:SS 형식
+        console.log(`✅ Parsed time: ${timeStr} → ${result}`);
+        return result;
       }
 
       // "오후 2시" 형식
@@ -210,82 +213,68 @@ class ImprovedScheduleStorage {
           hour = 0;
         }
         
-        return `${hour.toString().padStart(2, '0')}:00:00`;
+        const result = `${hour.toString().padStart(2, '0')}:00:00`;
+        console.log(`✅ Parsed Korean time: ${timeStr} → ${result}`);
+        return result;
       }
 
       // "14시" 형식
       const hourMatch = timeStr.match(/(\d{1,2})시/);
       if (hourMatch) {
         const hour = parseInt(hourMatch[1]);
-        return `${hour.toString().padStart(2, '0')}:00:00`;
+        const result = `${hour.toString().padStart(2, '0')}:00:00`;
+        console.log(`✅ Parsed hour: ${timeStr} → ${result}`);
+        return result;
       }
 
-    } catch (error) {
-      console.warn('Time parsing failed:', timeStr, error.message);
-    }
+      console.warn('⚠️ Could not parse time:', timeStr);
+      return null;
 
-    return null;
+    } catch (error) {
+      console.warn('❌ Time parsing failed:', timeStr, error.message);
+      return null;
+    }
   }
 
-  // 월별 일정 조회 (컬럼 존재 여부 대응)
+  // 월별 일정 조회
   async getMonthlySchedules(userId, month, year = null) {
     try {
       const currentYear = year || new Date().getFullYear();
       
-      // 새 컬럼 존재 여부 확인
-      const [columns] = await pool.query(
-        "SHOW COLUMNS FROM user_personal_data LIKE 'schedule_title'"
-      );
-      const hasNewColumns = columns.length > 0;
-      
-      let query, params;
-      
-      if (hasNewColumns) {
-        // 새 컬럼이 있는 경우
-        query = `
-          SELECT id, schedule_title, schedule_date, schedule_time, schedule_location,
-                 data_key, encrypted_value, context, iv, auth_tag, created_at
-          FROM user_personal_data 
-          WHERE user_id = ? 
-            AND data_type = 'schedule'
-            AND is_active = 1
-            AND (
-              (schedule_date IS NOT NULL AND MONTH(schedule_date) = ? AND YEAR(schedule_date) = ?)
-              OR (schedule_date IS NULL AND (
-                context->>'$.date' LIKE ? OR 
-                context->>'$.schedule_date' LIKE ?
-              ))
-            )
-          ORDER BY schedule_date ASC, schedule_time ASC, created_at ASC
-        `;
-        params = [userId, month, currentYear, `${month}월%`, `${currentYear}-${month.toString().padStart(2, '0')}%`];
-      } else {
-        // 기존 컬럼만 사용 (context에서 정보 추출)
-        query = `
-          SELECT id, data_key, encrypted_value, context, iv, auth_tag, created_at
-          FROM user_personal_data 
-          WHERE user_id = ? 
-            AND data_type = 'schedule'
-            AND is_active = 1
-            AND (
+      const query = `
+        SELECT id, schedule_title, schedule_date, schedule_time, schedule_location,
+               data_key, encrypted_value, context, iv, auth_tag, created_at
+        FROM user_personal_data 
+        WHERE user_id = ? 
+          AND data_type = 'schedule'
+          AND is_active = 1
+          AND (
+            (schedule_date IS NOT NULL AND MONTH(schedule_date) = ? AND YEAR(schedule_date) = ?)
+            OR (schedule_date IS NULL AND (
               context->>'$.date' LIKE ? OR 
-              context->>'$.schedule_date' LIKE ? OR
-              JSON_EXTRACT(context, '$.schedule_date') LIKE ?
-            )
-          ORDER BY created_at ASC
-        `;
-        params = [userId, `${month}월%`, `${currentYear}-${month.toString().padStart(2, '0')}%`, `${currentYear}-${month.toString().padStart(2, '0')}%`];
-      }
+              data_key LIKE ?
+            ))
+          )
+        ORDER BY schedule_date ASC, schedule_time ASC, created_at ASC
+      `;
+      
+      const params = [
+        userId, 
+        month, 
+        currentYear, 
+        `${month}월%`, 
+        `%${month}월%`
+      ];
 
       const [rows] = await pool.query(query, params);
       
-      console.log(`📅 Found ${rows.length} schedules for ${month}월 (${hasNewColumns ? 'new' : 'legacy'} format)`);
+      console.log(`📅 Found ${rows.length} schedules for ${month}월 ${currentYear}년`);
       
       if (rows.length === 0) {
         return `${month}월에 등록된 일정이 없습니다.`;
       }
 
-      return this.formatMonthlySchedules(rows, month, hasNewColumns);
+      return this.formatMonthlySchedules(rows, month);
 
     } catch (error) {
       console.error('Error getting monthly schedules:', error);
@@ -293,8 +282,8 @@ class ImprovedScheduleStorage {
     }
   }
 
-  // 월별 일정 포맷팅 (컬럼 존재 여부 대응)
-  formatMonthlySchedules(schedules, month, hasNewColumns = true) {
+  // 월별 일정 포맷팅
+  formatMonthlySchedules(schedules, month) {
     const monthNames = {
       1: '1월', 2: '2월', 3: '3월', 4: '4월', 5: '5월', 6: '6월',
       7: '7월', 8: '8월', 9: '9월', 10: '10월', 11: '11월', 12: '12월'
@@ -309,44 +298,28 @@ class ImprovedScheduleStorage {
       let dateKey = '날짜 미정';
       let title, time, location;
       
-      if (hasNewColumns) {
-        // 새 컬럼에서 정보 추출
-        if (schedule.schedule_date) {
-          const date = new Date(schedule.schedule_date);
-          const day = date.getDate();
-          const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
-          const weekday = weekdays[date.getDay()];
-          dateKey = `${month}월 ${day}일 (${weekday})`;
-        }
-        
-        title = schedule.schedule_title || schedule.data_key || '일정';
-        time = schedule.schedule_time;
-        location = schedule.schedule_location;
+      // schedule_date가 있는 경우 우선 사용
+      if (schedule.schedule_date) {
+        const date = new Date(schedule.schedule_date);
+        const day = date.getDate();
+        const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
+        const weekday = weekdays[date.getDay()];
+        dateKey = `${month}월 ${day}일 (${weekday})`;
       } else {
-        // context에서 정보 추출
+        // context나 data_key에서 날짜 추출 시도
         try {
           const context = JSON.parse(schedule.context || '{}');
-          
-          if (context.schedule_date) {
-            const date = new Date(context.schedule_date);
-            if (!isNaN(date.getTime())) {
-              const day = date.getDate();
-              const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
-              const weekday = weekdays[date.getDay()];
-              dateKey = `${month}월 ${day}일 (${weekday})`;
-            }
-          } else if (context.date) {
+          if (context.date && context.date.includes(`${month}월`)) {
             dateKey = context.date;
           }
-          
-          title = context.schedule_title || context.title || schedule.data_key || '일정';
-          time = context.schedule_time || context.time;
-          location = context.schedule_location || context.location;
         } catch (error) {
           console.warn('Context parsing failed:', error);
-          title = schedule.data_key || '일정';
         }
       }
+      
+      title = schedule.schedule_title || schedule.data_key || '일정';
+      time = schedule.schedule_time;
+      location = schedule.schedule_location;
 
       if (!groupedByDate[dateKey]) {
         groupedByDate[dateKey] = [];
@@ -395,14 +368,14 @@ class ImprovedScheduleStorage {
     return result.trim();
   }
 
-  // 복수 일정 저장 (한 메시지에 여러 일정이 있는 경우)
+  // 복수 일정 저장
   async saveMultipleSchedules(userId, chatRoomId, schedules, originalMessage) {
     const savedSchedules = [];
     
     for (const schedule of schedules) {
       try {
         const result = await this.saveIntegratedSchedule(userId, chatRoomId, schedule, originalMessage);
-        savedSchedules.push({ ...schedule, savedId: result.id });
+        savedSchedules.push(result);
       } catch (error) {
         console.error('Failed to save schedule:', schedule, error);
       }

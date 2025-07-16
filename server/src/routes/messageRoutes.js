@@ -4,24 +4,30 @@ const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
-// EnhancedMessageController 안전하게 로드
+// ImprovedMessageController 로드
 let controller;
 try {
-  controller = require('../controllers/enhancedMessageController');
-  console.log('✅ EnhancedMessageController loaded successfully');
+  controller = require('../controllers/improvedMessageController');
+  console.log('✅ ImprovedMessageController loaded successfully');
 } catch (error) {
-  console.warn('⚠️ EnhancedMessageController not found, using fallback handlers:', error.message);
-  
-  // 기본 핸들러들 정의
-  controller = {
-    sendMessage: (req, res) => {
-      res.json({ 
-        success: true, 
-        message: 'Message sent - Controller not implemented yet',
-        data: req.body 
-      });
-    }
-  };
+  console.warn('⚠️ ImprovedMessageController not found, trying EnhancedMessageController:', error.message);
+  try {
+    controller = require('../controllers/enhancedMessageController');
+    console.log('✅ EnhancedMessageController loaded as fallback');
+  } catch (fallbackError) {
+    console.warn('⚠️ EnhancedMessageController not found either, using default handlers:', fallbackError.message);
+    
+    // 기본 핸들러들 정의
+    controller = {
+      sendMessage: (req, res) => {
+        res.json({ 
+          success: true, 
+          message: 'Message sent - Controller not implemented yet',
+          data: req.body 
+        });
+      }
+    };
+  }
 }
 
 // getHelp 메서드 정의 (controller에 없으므로 여기서 정의)

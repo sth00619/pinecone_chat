@@ -11,7 +11,7 @@ class ImprovedPersonalDataDetector {
     });
   }
 
-  // 향상된 일정 추출 및 저장 (질문 분류 개선)
+  // 향상된 일정 추출 및 저장
   async extractAndSaveSchedules(text, userId, chatRoomId) {
     try {
       // 먼저 간단한 패턴으로 조회 질문인지 확인
@@ -43,20 +43,22 @@ JSON 형식:
     {
       "title": "활동명",
       "date": "날짜",
+      "time": "시간 (옵션)",
+      "location": "장소 (옵션)",
       "confidence": 0.0-1.0
     }
   ]
 }
 
 예시:
-"7월 일정에 대해서 알려줘" → isQuery: true, isSchedule: false
-"9월 1일에 스키장 가기로 했어" → isQuery: false, isSchedule: true
+"6월 2일에 생일 파티에 가기로 했어" → isQuery: false, isSchedule: true, schedules: [{"title": "생일 파티", "date": "6월 2일"}]
+"나의 6월 일정에 대해서 알려줘" → isQuery: true, isSchedule: false
 `;
 
       const response = await this.openai.chat.completions.create({
         model: 'gpt-3.5-turbo',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1, // 더 낮은 temperature로 일관성 향상
+        temperature: 0.1,
         max_tokens: 300,
         response_format: { type: "json_object" }
       });
@@ -67,12 +69,13 @@ JSON 형식:
         text: text.substring(0, 50),
         isSchedule: result.isSchedule,
         isQuery: result.isQuery,
-        confidence: result.confidence
+        confidence: result.confidence,
+        schedules: result.schedules
       });
       
-      // 일정 등록인 경우 (높은 신뢰도에서만)
+      // 일정 등록인 경우
       if (result.isSchedule && !result.isQuery && result.confidence > 0.8) {
-        console.log(`📝 Saving ${result.schedules?.length || 0} integrated schedules...`);
+        console.log(`📝 Saving ${result.schedules?.length || 0} schedules...`);
         
         const validSchedules = (result.schedules || []).filter(s => s.confidence > 0.7);
         if (validSchedules.length > 0) {
@@ -88,7 +91,7 @@ JSON 형식:
             isScheduleRegistration: true,
             isScheduleQuery: false,
             schedules: savedSchedules,
-            response: this.generateRegistrationResponse(savedSchedules)
+            response: this.generateRegistrationResponse(validSchedules)
           };
         }
       }
@@ -133,7 +136,7 @@ JSON 형식:
       /.*일정.*대해서/, /.*일정.*물어/, /.*일정.*궁금/,
       /스케줄.*알려/, /스케줄.*뭐/, /스케줄.*있/,
       /(\d{1,2}월).*일정.*알려/, /(\d{1,2}월).*일정.*뭐/,
-      /나의.*일정/, /내.*일정.*뭐/
+      /나의.*일정/, /내.*일정.*뭐/, /일정에.*대해/
     ];
     
     return definiteQueryPatterns.some(pattern => pattern.test(text));
@@ -147,13 +150,7 @@ JSON 형식:
 
     if (savedSchedules.length === 1) {
       const schedule = savedSchedules[0];
-      const responses = [
-        `알겠습니다! ${schedule.title}${schedule.date ? ` (${schedule.date})` : ''}를 기억해두겠습니다. 😊`,
-        `네, ${schedule.title} 일정을 저장했습니다!${schedule.date ? ` ${schedule.date}에 잊지 말고 챙겨주세요! ⏰` : ''}`,
-        `${schedule.title} 일정 등록 완료했습니다!${schedule.time ? ` ${schedule.time}에 맞춰서 준비하시면 되겠네요! 👍` : ''}`,
-        `좋습니다! ${schedule.title}${schedule.date ? ` (${schedule.date})` : ''} 일정을 잘 기억해두겠습니다. 📝`
-      ];
-      return responses[Math.floor(Math.random() * responses.length)];
+      return `알겠습니다! ${schedule.title}${schedule.date ? ` (${schedule.date})` : ''}을 기억해두겠습니다. 😊`;
     }
 
     // 여러 일정인 경우
@@ -172,12 +169,12 @@ JSON 형식:
   // 메인 처리 함수
   async processMessage(message, userId, chatRoomId) {
     try {
-      console.log('🔍 Processing message for integrated schedules:', message);
+      console.log('🔍 Processing message for schedules:', message);
       
       const result = await this.extractAndSaveSchedules(message, userId, chatRoomId);
       
       if (result.isScheduleRegistration) {
-        console.log(`✅ Registered ${result.schedules.length} integrated schedule(s)`);
+        console.log(`✅ Registered ${result.schedules.length} schedule(s)`);
       } else if (result.isScheduleQuery) {
         console.log('📋 Schedule query detected');
       }
@@ -199,7 +196,6 @@ JSON 형식:
   // 사용자 컨텍스트 구축 (기존 시스템과 호환)
   async buildUserContext(userId, currentMessage) {
     try {
-      // 기본 컨텍스트 구조
       const context = {
         schedules: [],
         preferences: [],
@@ -212,9 +208,8 @@ JSON 형식:
         hasPersonalData: false
       };
 
-      // 일정 데이터 로드 (새로운 시스템 사용)
+      // 일정 데이터 로드
       try {
-        // DB에서 사용자의 모든 활성 일정 조회
         const query = `
           SELECT id, data_key, encrypted_value, context, iv, auth_tag, created_at,
                  schedule_title, schedule_date, schedule_time, schedule_location
@@ -227,18 +222,15 @@ JSON 형식:
         const [rows] = await pool.query(query, [userId]);
         
         if (rows.length > 0) {
-          // 일정 데이터 파싱
           context.schedules = rows.map(row => {
             let title, date, time, location;
             
-            // 새 컬럼이 있는 경우
             if (row.schedule_title) {
               title = row.schedule_title;
               date = row.schedule_date;
               time = row.schedule_time;
               location = row.schedule_location;
             } else {
-              // context에서 추출
               try {
                 const contextData = JSON.parse(row.context || '{}');
                 title = contextData.schedule_title || contextData.title || row.data_key || '일정';
@@ -310,14 +302,14 @@ JSON 형식:
     return relevant.slice(0, 5);
   }
 
-  // 일정 관련 질문인지 확인 (누락된 메서드 추가)
+  // 일정 관련 질문인지 확인
   isScheduleQuery(message) {
     const queryPatterns = [
       /일정.*뭐/, /일정.*있/, /무슨.*일정/, /어떤.*일정/,
       /스케줄.*뭐/, /스케줄.*있/, /무슨.*스케줄/,
       /(오늘|내일|이번주|다음주).*일정/,
       /(\d{1,2}월).*일정/, /일정.*(\d{1,2}월)/,
-      /내.*일정/, /나의.*일정/
+      /내.*일정/, /나의.*일정/, /일정에.*대해/
     ];
     
     return queryPatterns.some(pattern => pattern.test(message));
